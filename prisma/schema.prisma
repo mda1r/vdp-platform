@@ -1,0 +1,424 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================
+// ENUMS
+// ============================================================
+
+enum Role {
+  RESEARCHER
+  COMPANY
+  ADMIN
+}
+
+enum ReportStatus {
+  NEW
+  TRIAGED
+  ACCEPTED
+  RESOLVED
+  CLOSED
+  DUPLICATE
+  INFORMATIVE
+  OUT_OF_SCOPE
+  NOT_APPLICABLE
+  SPAM
+}
+
+enum Priority {
+  P1_CRITICAL
+  P2_HIGH
+  P3_MEDIUM
+  P4_LOW
+  P5_INFO
+}
+
+enum ProgramStatus {
+  DRAFT
+  ACTIVE
+  PAUSED
+  CLOSED
+}
+
+enum NotificationType {
+  REPORT_STATUS_CHANGED
+  NEW_COMMENT
+  REPORT_SUBMITTED
+  BADGE_AWARDED
+  PROGRAM_UPDATE
+  SYSTEM
+}
+
+enum AuditAction {
+  LOGIN
+  LOGOUT
+  REGISTER
+  REPORT_CREATE
+  REPORT_UPDATE
+  REPORT_STATUS_CHANGE
+  COMMENT_CREATE
+  PROGRAM_CREATE
+  PROGRAM_UPDATE
+  USER_UPDATE
+  SETTINGS_CHANGE
+  ADMIN_ACTION
+  ATTACHMENT_UPLOAD
+  ATTACHMENT_DELETE
+}
+
+// ============================================================
+// AUTH — NextAuth.js required tables
+// ============================================================
+
+model Account {
+  id                String  @id @default(uuid()) @db.Uuid
+  userId            String  @db.Uuid
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+  @@map("accounts")
+}
+
+model Session {
+  id           String   @id @default(uuid()) @db.Uuid
+  sessionToken String   @unique
+  userId       String   @db.Uuid
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+  @@map("verification_tokens")
+}
+
+// ============================================================
+// USER
+// ============================================================
+
+model User {
+  id             String    @id @default(uuid()) @db.Uuid
+  name           String?
+  email          String    @unique
+  emailVerified  DateTime?
+  hashedPassword String?
+  image          String?
+  role           Role      @default(RESEARCHER)
+  bio            String?   @db.Text
+  skills         String[]
+  website        String?
+  github         String?
+  twitter        String?
+  points         Int       @default(0)
+  isActive       Boolean   @default(true)
+  isBanned       Boolean   @default(false)
+  banReason      String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  accounts      Account[]
+  sessions      Session[]
+  company       Company?
+  reports       Report[]       @relation("ReporterReports")
+  comments      Comment[]
+  timelines     Timeline[]
+  badges        UserBadge[]
+  notifications Notification[]
+  auditLogs     AuditLog[]
+
+  @@index([email])
+  @@index([role])
+  @@index([points(sort: Desc)])
+  @@map("users")
+}
+
+// ============================================================
+// COMPANY
+// ============================================================
+
+model Company {
+  id          String   @id @default(uuid()) @db.Uuid
+  userId      String   @unique @db.Uuid
+  name        String
+  logo        String?
+  website     String?
+  description String?  @db.Text
+  isVerified  Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  programs Program[]
+
+  @@index([isVerified])
+  @@map("companies")
+}
+
+// ============================================================
+// PROGRAM (VDP)
+// ============================================================
+
+model Program {
+  id          String        @id @default(uuid()) @db.Uuid
+  companyId   String        @db.Uuid
+  title       String
+  description String        @db.Text
+  status      ProgramStatus @default(DRAFT)
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  company Company      @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  scopes  ProgramScope[]
+  rules   ProgramRule[]
+  rewards ProgramReward[]
+  reports Report[]
+
+  @@index([companyId])
+  @@index([status])
+  @@map("programs")
+}
+
+model ProgramScope {
+  id        String  @id @default(uuid()) @db.Uuid
+  programId String  @db.Uuid
+  target    String
+  type      String
+  inScope   Boolean @default(true)
+  notes     String? @db.Text
+
+  program Program @relation(fields: [programId], references: [id], onDelete: Cascade)
+
+  @@index([programId])
+  @@map("program_scopes")
+}
+
+model ProgramRule {
+  id        String @id @default(uuid()) @db.Uuid
+  programId String @db.Uuid
+  title     String
+  content   String @db.Text
+  sortOrder Int    @default(0)
+
+  program Program @relation(fields: [programId], references: [id], onDelete: Cascade)
+
+  @@index([programId])
+  @@map("program_rules")
+}
+
+model ProgramReward {
+  id        String @id @default(uuid()) @db.Uuid
+  programId String @db.Uuid
+  priority  Priority
+  minAmount Decimal? @db.Decimal(10, 2)
+  maxAmount Decimal? @db.Decimal(10, 2)
+  currency  String   @default("USD")
+
+  program Program @relation(fields: [programId], references: [id], onDelete: Cascade)
+
+  @@unique([programId, priority])
+  @@map("program_rewards")
+}
+
+// ============================================================
+// REPORT (vulnerability submission)
+// ============================================================
+
+model Report {
+  id               String       @id @default(uuid()) @db.Uuid
+  researcherId     String       @db.Uuid
+  programId        String       @db.Uuid
+  title            String
+  description      String       @db.Text
+  stepsToReproduce String       @db.Text
+  vulnType         String
+  severity         String
+  cvssScore        Decimal?     @db.Decimal(3, 1)
+  status           ReportStatus @default(NEW)
+  priority         Priority?
+  rewardAmount     Decimal?     @db.Decimal(10, 2)
+  isEncrypted      Boolean      @default(false)
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+
+  researcher  User         @relation("ReporterReports", fields: [researcherId], references: [id])
+  program     Program      @relation(fields: [programId], references: [id])
+  attachments Attachment[]
+  comments    Comment[]
+  timelines   Timeline[]
+
+  @@index([researcherId])
+  @@index([programId])
+  @@index([status])
+  @@index([priority])
+  @@index([createdAt(sort: Desc)])
+  @@map("reports")
+}
+
+model Attachment {
+  id        String   @id @default(uuid()) @db.Uuid
+  reportId  String   @db.Uuid
+  filename  String
+  storedName String
+  mimeType  String
+  size      Int
+  url       String
+  createdAt DateTime @default(now())
+
+  report Report @relation(fields: [reportId], references: [id], onDelete: Cascade)
+
+  @@index([reportId])
+  @@map("attachments")
+}
+
+// ============================================================
+// COMMENTS & TIMELINE
+// ============================================================
+
+model Comment {
+  id        String   @id @default(uuid()) @db.Uuid
+  reportId  String   @db.Uuid
+  userId    String   @db.Uuid
+  content   String   @db.Text
+  isInternal Boolean @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  report Report @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id])
+
+  @@index([reportId])
+  @@index([userId])
+  @@map("comments")
+}
+
+model Timeline {
+  id        String   @id @default(uuid()) @db.Uuid
+  reportId  String   @db.Uuid
+  userId    String   @db.Uuid
+  action    String
+  oldStatus String?
+  newStatus String?
+  metadata  Json?
+  createdAt DateTime @default(now())
+
+  report Report @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id])
+
+  @@index([reportId])
+  @@index([createdAt])
+  @@map("timelines")
+}
+
+// ============================================================
+// BADGES & GAMIFICATION
+// ============================================================
+
+model Badge {
+  id          String      @id @default(uuid()) @db.Uuid
+  slug        String      @unique
+  name        String
+  description String
+  icon        String
+  createdAt   DateTime    @default(now())
+
+  users UserBadge[]
+
+  @@map("badges")
+}
+
+model UserBadge {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @db.Uuid
+  badgeId   String   @db.Uuid
+  awardedAt DateTime @default(now())
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  badge Badge @relation(fields: [badgeId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, badgeId])
+  @@map("user_badges")
+}
+
+// ============================================================
+// NOTIFICATIONS
+// ============================================================
+
+model Notification {
+  id        String           @id @default(uuid()) @db.Uuid
+  userId    String           @db.Uuid
+  type      NotificationType
+  title     String
+  message   String
+  link      String?
+  isRead    Boolean          @default(false)
+  createdAt DateTime         @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, isRead])
+  @@index([createdAt(sort: Desc)])
+  @@map("notifications")
+}
+
+// ============================================================
+// AUDIT LOG — tracks every sensitive operation
+// ============================================================
+
+model AuditLog {
+  id        String      @id @default(uuid()) @db.Uuid
+  userId    String?     @db.Uuid
+  action    AuditAction
+  entity    String?
+  entityId  String?     @db.Uuid
+  metadata  Json?
+  ipAddress String?
+  userAgent String?
+  createdAt DateTime    @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([action])
+  @@index([entity, entityId])
+  @@index([createdAt(sort: Desc)])
+  @@map("audit_logs")
+}
+
+// ============================================================
+// RATE LIMITING — persisted for distributed rate limit
+// ============================================================
+
+model RateLimit {
+  id         String   @id @default(uuid()) @db.Uuid
+  key        String
+  points     Int      @default(0)
+  expireAt   DateTime
+
+  @@unique([key])
+  @@index([expireAt])
+  @@map("rate_limits")
+}
